@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>糖果彩虹 3D 爱心 · 拖动它</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #07020c; }
+  body {
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #fff;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    cursor: grab;
+  }
+  body.dragging { cursor: grabbing; }
+  canvas.layer { position: fixed; inset: 0; display: block; width: 100%; height: 100%; pointer-events: none; }
+  #gl { pointer-events: none; }
+  #hit { position: fixed; inset: 0; z-index: 5; }
+
+  .ui {
+    position: fixed; inset: 0; pointer-events: none; z-index: 10;
+    display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .head { padding: clamp(16px, 3vw, 34px) clamp(18px, 4vw, 46px); }
+  .head h1 {
+    font-size: clamp(12px, 1.5vw, 15px);
+    font-weight: 600; letter-spacing: .46em; text-indent: .46em;
+    opacity: .92; text-shadow: 0 2px 18px rgba(255, 120, 200, .5);
+  }
+  .head p {
+    margin-top: 10px; font-size: clamp(11px, 1.25vw, 13px);
+    letter-spacing: .1em; color: rgba(255, 255, 255, .5);
+  }
+  .foot {
+    padding: 0 clamp(14px, 4vw, 46px) clamp(18px, 3.4vw, 38px);
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+  }
+  .hint { font-size: 11px; letter-spacing: .18em; color: rgba(255, 255, 255, .26); }
+  .modes {
+    pointer-events: auto;
+    display: flex; gap: 6px; padding: 7px; border-radius: 999px;
+    background: rgba(255, 255, 255, .07);
+    border: 1px solid rgba(255, 255, 255, .14);
+    backdrop-filter: blur(16px) saturate(170%);
+    -webkit-backdrop-filter: blur(16px) saturate(170%);
+    box-shadow: 0 16px 46px rgba(0, 0, 0, .5), inset 0 1px 0 rgba(255, 255, 255, .16);
+  }
+  .modes button {
+    pointer-events: auto;
+    appearance: none; border: 0; cursor: pointer;
+    font: inherit; font-size: clamp(11px, 1.2vw, 12.5px);
+    letter-spacing: .12em; color: rgba(255, 255, 255, .62);
+    padding: 9px 18px; border-radius: 999px;
+    background: transparent;
+    transition: color .28s ease, background .28s ease, box-shadow .28s ease;
+    white-space: nowrap;
+  }
+  .modes button:hover { color: #fff; background: rgba(255, 255, 255, .08); }
+  .modes button.on {
+    color: #150310;
+    background: linear-gradient(135deg, #ffffff, #ffd7ef);
+    box-shadow: 0 6px 22px rgba(255, 140, 210, .45);
+    font-weight: 600;
+  }
+  @media (max-width: 520px) {
+    .head h1 { letter-spacing: .26em; text-indent: .26em; }
+    .modes button { padding: 8px 13px; }
+  }
+</style>
+</head>
+<body>
+<canvas class="layer" id="bg"></canvas>
+<canvas class="layer" id="under"></canvas>
+<canvas class="layer" id="gl"></canvas>
+<canvas class="layer" id="fx"></canvas>
+<div id="hit"></div>
+
+<div class="ui">
+  <div class="head">
+    <h1>Drag Me · 糖果 3D 爱心</h1>
+    <p>按住拖走 · 甩一下带着惯性旋转 · 双击 / 点下面换配色</p>
+  </div>
+  <div class="foot">
+    <div class="hint">点击爱心抖一抖</div>
+    <div class="modes" id="modes"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var bgc = document.getElementById('bg');
+  var undc = document.getElementById('under');
+  var glc = document.getElementById('gl');
+  var fxc = document.getElementById('fx');
+
+  var bgx = bgc.getContext('2d');
+  var und = undc.getContext('2d');
+  var fx = fxc.getContext('2d');
+
+  var W = 1, H = 1, DPR = 1, BDPR = 1;
+
+  /* ------------------------------------------------------------------ */
+  /*  colour helpers                                                     */
+  /* ------------------------------------------------------------------ */
+  function hsl2rgb(h, s, l) {
+    h = ((h % 1) + 1) % 1;
+    var a = s * Math.min(l, 1 - l);
+    function f(n) {
+      var k = (n + h * 12) % 12;
+      return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    }
+    return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  palettes                                                           */
+  /* ------------------------------------------------------------------ */
+  var MODES = [
+    {
+      id: 'candy', label: '糖果系',
+      hueBase: 342, spread: -104, hueY: -26, speed: 8,
+      sat: 0.86, lit: 0.695, gloss: 0.92, amb: 0.50,
+      bg: ['#4a1140', '#1a0626', '#07020d'],
+      glow: [255, 118, 200], rim: [255, 214, 246], envA: [255, 250, 253], envB: [255, 150, 212],
+      sprink: 56
+    },
+    {
+      id: 'rainbow', label: '彩虹系',
+      hueBase: 4, spread: 330, hueY: 116, speed: 22,
+      sat: 0.94, lit: 0.60, gloss: 1.0, amb: 0.42,
+      bg: ['#161b4c', '#080b20', '#02030a'],
+      glow: [112, 168, 255], rim: [196, 238, 255], envA: [226, 250, 255], envB: [128, 150, 255],
+      sprink: 40
+    },
+    {
+      id: 'aurora', label: '极光糖',
+      hueBase: 158, spread: 130, hueY: 64, speed: 13,
+      sat: 0.90, lit: 0.645, gloss: 1.05, amb: 0.46,
+      bg: ['#04312c', '#03131d', '#01060a'],
+      glow: [66, 255, 205], rim: [186, 255, 236], envA: [236, 255, 250], envB: [70, 240, 200],
+      sprink: 44
+    }
+  ];
+  var modeIdx = 0;
+  var mode = MODES[0];
+
+  /* ------------------------------------------------------------------ */
+  /*  heart mesh                                                         */
+  /* ------------------------------------------------------------------ */
+  var SEG_T = 168;
+  var SEG_Z = 44;
+  var THICK = 0.62;
+
+  var posData, nrmData, uvData, idxData, indexCount;
+  var vertsN = 0;
+
+  function buildMesh() {
+    var ringC = SEG_Z + 1, segC = SEG_T + 1;
+    vertsN = ringC * segC;
+
+    var ox = new Float64Array(segC), oy = new Float64Array(segC);
+    var minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+    for (var j = 0; j < segC; j++) {
+      var t = j / SEG_T * Math.PI * 2;
+      var s = Math.sin(t);
+      var x = 16 * s * s * s;
+      var y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+      ox[j] = x; oy[j] = y;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    var cx0 = (minX + maxX) / 2, cy0 = (minY + maxY) / 2;
+    var k = 2 / (maxY - minY);
+
+    var P = new Float32Array(vertsN * 3);
+    var U = new Float32Array(vertsN * 2);
+
+    for (var i = 0; i < ringC; i++) {
+      var zn = -1 + 2 * (i / SEG_Z);
+      var sc = Math.sqrt(Math.max(0, 1 - zn * zn));
+      for (var jj = 0; jj < segC; jj++) {
+        var id = i * segC + jj;
+        var hx = (ox[jj] - cx0) * k * sc;
+        var hy = (oy[jj] - cy0) * k * sc;
+        var hz = zn * THICK;
+        P[id * 3] = hx; P[id * 3 + 1] = hy; P[id * 3 + 2] = hz;
+        /* candy band parameter: smooth, seam free */
+        var band = 0.5 + 0.5 * Math.sin(4.1 * hx + 2.35 * hy + 2.1 * hz + 0.7);
+        U[id * 2] = band;
+        U[id * 2 + 1] = hy * 0.5 + 0.5;
+      }
+    }
+
+    /* normals */
+    var N = new Float32Array(vertsN * 3);
+    for (var a = 0; a < SEG_Z; a++) {
+      for (var b = 0; b < SEG_T; b++) {
+        var i0 = a * segC + b, i1 = a * segC + b + 1;
+        var i2 = (a + 1) * segC + b, i3 = (a + 1) * segC + b + 1;
+        accum(i0, i1, i3); accum(i0, i3, i2);
+      }
+    }
+    function accum(A, B, C) {
+      var e1x = P[B * 3] - P[A * 3], e1y = P[B * 3 + 1] - P[A * 3 + 1], e1z = P[B * 3 + 2] - P[A * 3 + 2];
+      var e2x = P[C * 3] - P[A * 3], e2y = P[C * 3 + 1] - P[A * 3 + 1], e2z = P[C * 3 + 2] - P[A * 3 + 2];
+      var nx = e1y * e2z - e1z * e2y;
+      var ny = e1z * e2x - e1x * e2z;
+      var nz = e1x * e2y - e1y * e2x;
+      N[A * 3] += nx; N[A * 3 + 1] += ny; N[A * 3 + 2] += nz;
+      N[B * 3] += nx; N[B * 3 + 1] += ny; N[B * 3 + 2] += nz;
+      N[C * 3] += nx; N[C * 3 + 1] += ny; N[C * 3 + 2] += nz;
+    }
+    var acc = 0;
+    for (var n = 0; n < vertsN; n += 5) {
+      acc += N[n * 3] * P[n * 3] + N[n * 3 + 1] * P[n * 3 + 1] + N[n * 3 + 2] * P[n * 3 + 2];
+    }
+    var flip = acc < 0 ? -1 : 1;
+    for (var n2 = 0; n2 < vertsN; n2++) {
+      var nx2 = N[n2 * 3] * flip, ny2 = N[n2 * 3 + 1] * flip, nz2 = N[n2 * 3 + 2] * flip;
+      var len = Math.sqrt(nx2 * nx2 + ny2 * ny2 + nz2 * nz2) || 1;
+      N[n2 * 3] = nx2 / len; N[n2 * 3 + 1] = ny2 / len; N[n2 * 3 + 2] = nz2 / len;
+    }
+
+    /* indices */
+    var I = new Uint16Array(SEG_Z * SEG_T * 6);
+    var w = 0;
+    for (var a2 = 0; a2 < SEG_Z; a2++) {
+      for (var b2 = 0; b2 < SEG_T; b2++) {
+        var p0 = a2 * segC + b2, p1 = a2 * segC + b2 + 1;
+        var p2 = (a2 + 1) * segC + b2, p3 = (a2 + 1) * segC + b2 + 1;
+        I[w++] = p0; I[w++] = p1; I[w++] = p3;
+        I[w++] = p0; I[w++] = p3; I[w++] = p2;
+      }
+    }
+
+    posData = P; nrmData = N; uvData = U; idxData = I;
+    indexCount = I.length;
+    bakeSprinkles(P);
+  }
+
+  /* sprinkles pinned on the front of the heart */
+  var sprinkleVert = [], sprinkleRot = [], sprinkleHue = [];
+  function bakeSprinkles(P) {
+    /* greedy scatter on the front surface, so the dots stay evenly spread */
+    var cand = [];
+    for (var i = 0; i < vertsN; i++) {
+      if (P[i * 3 + 2] > THICK * 0.30 && Math.abs(P[i * 3]) < 0.86) cand.push(i);
+    }
+    var minD = 0.215, picked = [];
+    for (var c = 0; c < cand.length; c++) {
+      var ci = cand[c], x = P[ci * 3], y = P[ci * 3 + 1];
+      var ok = true;
+      for (var k = 0; k < picked.length; k++) {
+        var pj = picked[k];
+        var dx = x - P[pj * 3], dy = y - P[pj * 3 + 1];
+        if (dx * dx + dy * dy < minD * minD) { ok = false; break; }
+      }
+      if (ok) picked.push(ci);
+    }
+    for (var q = 0; q < picked.length; q++) {
+      var vi = picked[q];
+      sprinkleVert.push(vi);
+      sprinkleRot.push((vi * 2.39996) % (Math.PI * 2));
+      sprinkleHue.push(((vi * 0.6180339887 * 1.7) % 1));
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  WebGL                                                              */
+  /* ------------------------------------------------------------------ */
+  var VS_SRC = [
+    'attribute vec3 aPos;',
+    'attribute vec3 aNrm;',
+    'attribute vec2 aUV;',
+    'uniform mat3 uRot;',
+    'uniform float uPulse;',
+    'uniform float uDist;',
+    'uniform float uScale;',
+    'uniform vec2 uCenter;',
+    'uniform vec2 uRes;',
+    'varying vec3 vN;',
+    'varying vec2 vUV;',
+    'varying float vZ;',
+    'void main() {',
+    '  vec3 p = uRot * (aPos * uPulse);',
+    '  vec3 n = uRot * aNrm;',
+    '  float f = uDist / (uDist - p.z);',
+    '  vec2 scr = uCenter + vec2(p.x * f * uScale, -p.y * f * uScale);',
+    '  gl_Position = vec4(scr.x / uRes.x * 2.0 - 1.0, 1.0 - scr.y / uRes.y * 2.0, -p.z * 0.35, 1.0);',
+    '  vN = n; vUV = aUV; vZ = p.z;',
+    '}'
+  ].join('\n');
+
+  var FS_SRC = [
+    '#ifdef GL_FRAGMENT_PRECISION_HIGH',
+    'precision highp float;',
+    '#else',
+    'precision mediump float;',
+    '#endif',
+    'varying vec3 vN;',
+    'varying vec2 vUV;',
+    'varying float vZ;',
+    'uniform vec3 uLight;',
+    'uniform vec3 uRim;',
+    'uniform vec3 uEnvA;',
+    'uniform vec3 uEnvB;',
+    'uniform float uHueBase;',
+    'uniform float uSpread;',
+    'uniform float uHueY;',
+    'uniform float uHueShift;',
+    'uniform float uSat;',
+    'uniform float uLit;',
+    'uniform float uAmb;',
+    'uniform float uGloss;',
+    'vec3 hsl2rgb(float h, float s, float l) {',
+    '  vec3 rgb = clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);',
+    '  float c = (1.0 - abs(2.0 * l - 1.0)) * s;',
+    '  return l + c * (rgb - 0.5);',
+    '}',
+    'void main() {',
+    '  vec3 N = normalize(vN);',
+    '  float hue = (uHueBase + uSpread * vUV.x + uHueY * vUV.y + uHueShift) / 360.0;',
+    '  vec3 base = hsl2rgb(hue, uSat, uLit);',
+    '  vec3 V = vec3(0.0, 0.0, 1.0);',
+    '  vec3 L = normalize(uLight);',
+    '  vec3 H = normalize(L + V);',
+    '  float diff = max(dot(N, L), 0.0);',
+    '  float nh = max(dot(N, H), 0.0);',
+    '  float sp = pow(nh, 90.0) * 0.40 * uGloss;',
+    '  float sp2 = pow(nh, 12.0) * 0.10 * uGloss;',
+    '  vec3 R = reflect(-V, N);',
+    '  vec3 env = mix(uEnvB, uEnvA, clamp(R.y * 0.5 + 0.5, 0.0, 1.0));',
+    '  float fres = pow(1.0 - max(N.z, 0.0), 3.0);',
+    '  float fog = mix(0.54, 1.0, clamp(vZ * 0.8 + 0.6, 0.0, 1.0));',
+    '  vec3 col = base * (uAmb + diff * (1.0 - uAmb) * 1.04) * fog;',
+    '  col += env * fres * 0.34;',
+    '  col += (vec3(0.82) + base * 0.45) * (sp + sp2);',
+    '  col += uRim * fres * 0.20;',
+    '  col *= mix(0.78, 1.0, clamp(vUV.y * 0.8 + 0.44, 0.0, 1.0));',
+    '  col = col / (vec3(1.0) + col * 0.26);',
+    '  gl_FragColor = vec4(min(col * 1.18, vec3(1.0)), 1.0);',
+    '}'
+  ].join('\n');
+
+  var gl = null, prog = null, U = {}, bufPos, bufNrm, bufUV, bufIdx;
+
+  function compile(type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(sh), src);
+      return null;
+    }
+    return sh;
+  }
+
+  function initGL() {
+    var opts = { alpha: true, antialias: true, premultipliedAlpha: false, depth: true };
+    gl = glc.getContext('webgl', opts) || glc.getContext('experimental-webgl', opts);
+    if (!gl) return false;
+
+    var vs = compile(gl.VERTEX_SHADER, VS_SRC);
+    var fs = compile(gl.FRAGMENT_SHADER, FS_SRC);
+    if (!vs || !fs) return false;
+
+    prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.error(gl.getProgramInfoLog(prog));
+      return false;
+    }
+
+    bufPos = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufPos);
+    gl.bufferData(gl.ARRAY_BUFFER, posData, gl.STATIC_DRAW);
+
+    bufNrm = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufNrm);
+    gl.bufferData(gl.ARRAY_BUFFER, nrmData, gl.STATIC_DRAW);
+
+    bufUV = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufUV);
+    gl.bufferData(gl.ARRAY_BUFFER, uvData, gl.STATIC_DRAW);
+
+    bufIdx = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idxData, gl.STATIC_DRAW);
+
+    ['uRot', 'uPulse', 'uDist', 'uScale', 'uCenter', 'uRes', 'uLight', 'uRim', 'uEnvA', 'uEnvB',
+      'uHueBase', 'uSpread', 'uHueY', 'uHueShift', 'uSat', 'uLit', 'uAmb', 'uGloss'
+    ].forEach(function (n) { U[n] = gl.getUniformLocation(prog, n); });
+    return true;
+  }
+
+  function drawHeartWebGL(cx, cy, S, pulse, rotM, hueShift) {
+    gl.viewport(0, 0, glc.width, glc.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    gl.useProgram(prog);
+
+    var aPos = gl.getAttribLocation(prog, 'aPos');
+    var aNrm = gl.getAttribLocation(prog, 'aNrm');
+    var aUV = gl.getAttribLocation(prog, 'aUV');
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufPos);
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufNrm);
+    gl.enableVertexAttribArray(aNrm);
+    gl.vertexAttribPointer(aNrm, 3, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufUV);
+    gl.enableVertexAttribArray(aUV);
+    gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
+
+    gl.uniformMatrix3fv(U.uRot, false, rotM);
+    gl.uniform1f(U.uPulse, pulse);
+    gl.uniform1f(U.uDist, DC);
+    gl.uniform1f(U.uScale, S);
+    gl.uniform2f(U.uCenter, cx, cy);
+    gl.uniform2f(U.uRes, W, H);
+
+    gl.uniform3f(U.uLight, LX, LY, LZ);
+    gl.uniform3f(U.uRim, mode.rim[0] / 255, mode.rim[1] / 255, mode.rim[2] / 255);
+    gl.uniform3f(U.uEnvA, mode.envA[0] / 255, mode.envA[1] / 255, mode.envA[2] / 255);
+    gl.uniform3f(U.uEnvB, mode.envB[0] / 255, mode.envB[1] / 255, mode.envB[2] / 255);
+
+    gl.uniform1f(U.uHueBase, mode.hueBase);
+    gl.uniform1f(U.uSpread, mode.spread);
+    gl.uniform1f(U.uHueY, mode.hueY);
+    gl.uniform1f(U.uHueShift, hueShift);
+    gl.uniform1f(U.uSat, mode.sat);
+    gl.uniform1f(U.uLit, mode.lit);
+    gl.uniform1f(U.uAmb, mode.amb);
+    gl.uniform1f(U.uGloss, mode.gloss);
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx);
+    gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_SHORT, 0);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  background (static, repainted on resize / mode change)             */
+  /* ------------------------------------------------------------------ */
+  var stars = [];
+  function makeStars() {
+    stars = [];
+    var count = Math.round(Math.min(240, (W * H) / 8500));
+    for (var i = 0; i < count; i++) {
+      stars.push({
+        x: Math.random(), y: Math.random(),
+        r: Math.random() * 1.4 + 0.35,
+        a: Math.random() * 0.45 + 0.1,
+        ph: Math.random() * 6.283
+      });
+    }
+  }
+
+  function paintBackground() {
+    var m = mode;
+    bgx.setTransform(BDPR, 0, 0, BDPR, 0, 0);
+    bgx.clearRect(0, 0, W, H);
+
+    var g = bgx.createLinearGradient(0, 0, W * 0.42, H);
+    g.addColorStop(0, m.bg[0]);
+    g.addColorStop(0.55, m.bg[1]);
+    g.addColorStop(1, m.bg[2]);
+    bgx.fillStyle = g;
+    bgx.fillRect(0, 0, W, H);
+
+    bgx.globalCompositeOperation = 'lighter';
+    var big = Math.max(W, H);
+    var blobs = [
+      [W * 0.2, H * 0.24, big * 0.64, 0.22],
+      [W * 0.85, H * 0.79, big * 0.52, 0.15],
+      [W * 0.63, H * 0.1, big * 0.36, 0.10]
+    ];
+    for (var i = 0; i < blobs.length; i++) {
+      var b = blobs[i];
+      var rg = bgx.createRadialGradient(b[0], b[1], 0, b[0], b[1], b[2]);
+      rg.addColorStop(0, 'rgba(' + m.glow[0] + ',' + m.glow[1] + ',' + m.glow[2] + ',' + b[3] + ')');
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      bgx.fillStyle = rg;
+      bgx.fillRect(0, 0, W, H);
+    }
+
+    bgx.globalCompositeOperation = 'source-over';
+    for (var s = 0; s < stars.length; s++) {
+      var st = stars[s];
+      bgx.fillStyle = 'rgba(255,255,255,' + st.a.toFixed(2) + ')';
+      bgx.beginPath();
+      bgx.arc(st.x * W, st.y * H, st.r, 0, 6.283);
+      bgx.fill();
+    }
+
+    var vg = bgx.createRadialGradient(W / 2, H * 0.46, Math.min(W, H) * 0.1, W / 2, H * 0.5, Math.max(W, H) * 0.8);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(0.6, 'rgba(0,0,0,0.20)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.84)');
+    bgx.fillStyle = vg;
+    bgx.fillRect(0, 0, W, H);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  state                                                              */
+  /* ------------------------------------------------------------------ */
+  var st = {
+    yaw: 0.4, pitch: -0.12, roll: -0.02,
+    yawV: 0.3, pitchV: 0,
+    offX: 0, offY: 0, offVX: 0, offVY: 0,
+    lookX: 0, lookY: 0,
+    held: 0, pulse: 1, lastMove: -10
+  };
+  var pointer = { x: 0, y: 0, has: false };
+  var drag = { on: false, id: null, lx: 0, ly: 0, t: 0, startX: 0, startY: 0, moved: 0 };
+
+  var time = 0, lastNow = 0;
+  var DC = 3.4;
+  var LX = -0.4, LY = 0.62, LZ = 0.78;
+
+  var ROT = new Float32Array(9);    /* row major, used in JS */
+  var ROTM = new Float32Array(9);   /* column major, used by WebGL */
+
+  function rotMatrix(yaw, pitch, roll, out) {
+    var cy = Math.cos(yaw), sy = Math.sin(yaw);
+    var cp = Math.cos(pitch), sp = Math.sin(pitch);
+    var cr = Math.cos(roll), sr = Math.sin(roll);
+
+    /* Ry * v, then Rx, then Rz  ->  R = Rz * Rx * Ry */
+    var a00 = cy, a01 = 0, a02 = sy;
+    var a10 = 0, a11 = 1, a12 = 0;
+    var a20 = -sy, a21 = 0, a22 = cy;
+
+    var b00 = a00, b01 = a01, b02 = a02;
+    var b10 = cp * a10 - sp * a20, b11 = cp * a11 - sp * a21, b12 = cp * a12 - sp * a22;
+    var b20 = sp * a10 + cp * a20, b21 = sp * a11 + cp * a21, b22 = sp * a12 + cp * a22;
+
+    var c00 = cr * b00 - sr * b10, c01 = cr * b01 - sr * b11, c02 = cr * b02 - sr * b12;
+    var c10 = sr * b00 + cr * b10, c11 = sr * b01 + cr * b11, c12 = sr * b02 + cr * b12;
+    var c20 = b20, c21 = b21, c22 = b22;
+
+    out[0] = c00; out[1] = c01; out[2] = c02;
+    out[3] = c10; out[4] = c11; out[5] = c12;
+    out[6] = c20; out[7] = c21; out[8] = c22;
+
+    ROTM[0] = c00; ROTM[1] = c10; ROTM[2] = c20;
+    ROTM[3] = c01; ROTM[4] = c11; ROTM[5] = c21;
+    ROTM[6] = c02; ROTM[7] = c12; ROTM[8] = c22;
+    return out;
+  }
+
+  function beat(t) {
+    var per = 1.06;
+    var p = (t % per) / per;
+    function th(c, w) { var d = (p - c) / w; return Math.exp(-d * d); }
+    return 0.34 * th(0.1, 0.052) + 0.2 * th(0.29, 0.068);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  particles                                                          */
+  /* ------------------------------------------------------------------ */
+  var parts = [], ripples = [];
+  var MAXP = 380;
+
+  function spawnPart(x, y, o) {
+    if (parts.length > MAXP) parts.shift();
+    parts.push({
+      x: x, y: y,
+      vx: o.vx != null ? o.vx : (Math.random() - 0.5) * 60,
+      vy: o.vy != null ? o.vy : (Math.random() - 0.5) * 60 - 20,
+      r: o.r != null ? o.r : Math.random() * 2.4 + 0.8,
+      life: 0,
+      max: o.max != null ? o.max : Math.random() * 1.1 + 0.6,
+      hue: o.hue != null ? o.hue : Math.random()
+    });
+  }
+
+  function emitTrail(x, y, n, power) {
+    for (var i = 0; i < n; i++) {
+      spawnPart(x + (Math.random() - 0.5) * 24, y + (Math.random() - 0.5) * 24, {
+        vx: (Math.random() - 0.5) * 90 * power,
+        vy: (Math.random() - 0.5) * 90 * power - 22,
+        r: Math.random() * 2.5 + 0.9
+      });
+    }
+  }
+
+  function spawnBurst(x, y, n) {
+    for (var i = 0; i < n; i++) {
+      var a = Math.random() * 6.283, s = 70 + Math.random() * 250;
+      spawnPart(x, y, {
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        r: Math.random() * 3 + 1, max: Math.random() * 1.1 + 0.6
+      });
+    }
+  }
+
+  function addRipple(x, y, strength) {
+    ripples.push({ x: x, y: y, r: 12, life: 0, max: 1.15, s: strength || 1 });
+    if (ripples.length > 12) ripples.shift();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  update                                                             */
+  /* ------------------------------------------------------------------ */
+  function update(dt) {
+    var idleFor = time - st.lastMove;
+
+    if (pointer.has && !drag.on) {
+      var tx = (pointer.x / W - 0.5) * 2;
+      var ty = (pointer.y / H - 0.5) * 2;
+      st.lookX += (tx - st.lookX) * Math.min(1, dt * 3.2);
+      st.lookY += (ty - st.lookY) * Math.min(1, dt * 3.2);
+    } else {
+      st.lookX += (0 - st.lookX) * Math.min(1, dt * 2.2);
+      st.lookY += (0 - st.lookY) * Math.min(1, dt * 2.2);
+    }
+
+    st.held += ((drag.on ? 1 : 0) - st.held) * Math.min(1, dt * 7);
+
+    if (!drag.on) {
+      st.offVX += (-30 * st.offX - 8.4 * st.offVX) * dt;
+      st.offVY += (-30 * st.offY - 8.4 * st.offVY) * dt;
+      st.offX += st.offVX * dt;
+      st.offY += st.offVY * dt;
+
+      var decay = Math.exp(-1.9 * dt);
+      st.yawV *= decay;
+      st.pitchV *= decay;
+      var auto = 0.3 + Math.max(0, 1.6 - idleFor) * 0.25;
+      st.yaw += (st.yawV + auto) * dt;
+      st.pitch += st.pitchV * dt;
+      st.pitch += (Math.sin(time * 0.7) * 0.09 - st.pitch * 0.05) * dt * 1.4;
+      st.roll *= Math.exp(-1.1 * dt);
+      st.pitch *= Math.exp(-0.3 * dt);
+    } else {
+      st.yaw += st.yawV * dt;
+      st.pitch += st.pitchV * dt;
+    }
+
+    if (st.pitch > 1.1) { st.pitch = 1.1; st.pitchV *= -0.35; }
+    if (st.pitch < -1.1) { st.pitch = -1.1; st.pitchV *= -0.35; }
+
+    st.pulse = 1 + beat(time) * 0.062 + st.held * 0.05;
+
+    var lx = -0.42 + st.lookX * 0.5, ly = 0.62 - st.lookY * 0.38, lz = 0.8;
+    var ll = Math.sqrt(lx * lx + ly * ly + lz * lz);
+    LX = lx / ll; LY = ly / ll; LZ = lz / ll;
+
+    for (var i = parts.length - 1; i >= 0; i--) {
+      var p = parts[i];
+      p.life += dt;
+      if (p.life >= p.max) { parts.splice(i, 1); continue; }
+      p.vy += 26 * dt;
+      p.vx *= Math.exp(-1.4 * dt);
+      p.vy *= Math.exp(-1.1 * dt);
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+    for (var r = ripples.length - 1; r >= 0; r--) {
+      var rp = ripples[r];
+      rp.life += dt;
+      rp.r += (250 - rp.r) * Math.min(1, dt * 2.6);
+      if (rp.life > rp.max) ripples.splice(r, 1);
+    }
+    if (parts.length < 70 && Math.random() < dt * 12) {
+      spawnPart(Math.random() * W, H + 20, {
+        vx: (Math.random() - 0.5) * 16,
+        vy: -12 - Math.random() * 24,
+        r: Math.random() * 2.2 + 0.7,
+        max: Math.random() * 5 + 4
+      });
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  render                                                             */
+  /* ------------------------------------------------------------------ */
+  function render() {
+    var cx = W * 0.5 + st.offX;
+    var cy = H * 0.52 + st.offY;
+    var S = Math.min(W * 0.38, H * 0.30) * st.pulse;
+    var pulse = st.pulse;
+    var heat = 0.55 + st.held * 0.45 + beat(time) * 0.45;
+
+    /* ---- under layer: glow + contact shadow ---- */
+    und.setTransform(DPR, 0, 0, DPR, 0, 0);
+    und.clearRect(0, 0, W, H);
+    und.globalCompositeOperation = 'lighter';
+    var gr = und.createRadialGradient(cx, cy, 0, cx, cy, S * 2.6);
+    gr.addColorStop(0, 'rgba(' + mode.glow[0] + ',' + mode.glow[1] + ',' + mode.glow[2] + ',' + (0.18 * heat).toFixed(3) + ')');
+    gr.addColorStop(0.45, 'rgba(' + mode.glow[0] + ',' + mode.glow[1] + ',' + mode.glow[2] + ',' + (0.085 * heat).toFixed(3) + ')');
+    gr.addColorStop(1, 'rgba(0,0,0,0)');
+    und.fillStyle = gr;
+    und.beginPath();
+    und.arc(cx, cy, S * 2.6, 0, 6.283);
+    und.fill();
+
+    und.globalCompositeOperation = 'source-over';
+    var shY = cy + S * 1.2 + Math.abs(st.offY) * 0.1;
+    und.save();
+    und.translate(cx + st.offX * 0.3, shY);
+    und.scale(1, 0.24);
+    var sg = und.createRadialGradient(0, 0, 0, 0, 0, S * 1.0);
+    sg.addColorStop(0, 'rgba(0,0,0,0.5)');
+    sg.addColorStop(0.55, 'rgba(0,0,0,0.16)');
+    sg.addColorStop(1, 'rgba(0,0,0,0)');
+    und.fillStyle = sg;
+    und.beginPath();
+    und.arc(0, 0, S * 1.0, 0, 6.283);
+    und.fill();
+    und.restore();
+
+    /* ---- rotation matrix: R = Rz(roll) * Rx(pitch) * Ry(yaw) ---- */
+    rotMatrix(st.yaw, st.pitch, st.roll, ROT);
+
+    var m00 = ROT[0], m01 = ROT[1], m02 = ROT[2];
+    var m10 = ROT[3], m11 = ROT[4], m12 = ROT[5];
+    var m20 = ROT[6], m21 = ROT[7], m22 = ROT[8];
+
+    var hueShift = time * mode.speed;
+
+    /* ---- heart ---- */
+    if (gl) {
+      drawHeartWebGL(cx, cy, S, pulse, ROTM, hueShift);
+    } else {
+      fallbackHeart(cx, cy, S, pulse);
+    }
+
+    /* ---- fx layer ---- */
+    fx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    fx.clearRect(0, 0, W, H);
+
+    /* sprinkles pinned on the surface */
+    if (sprinkleVert.length) {
+      var maxSpr = mode.sprink;
+      var gap = Math.max(1, Math.floor(sprinkleVert.length / maxSpr));
+      for (var s2 = 0; s2 < sprinkleVert.length; s2 += gap) {
+        var vi = sprinkleVert[s2];
+        var vx0 = posData[vi * 3] * pulse, vy0 = posData[vi * 3 + 1] * pulse, vz0 = posData[vi * 3 + 2] * pulse;
+        var nx0 = nrmData[vi * 3], ny0 = nrmData[vi * 3 + 1], nz0 = nrmData[vi * 3 + 2];
+        var rnx = m00 * nx0 + m01 * ny0 + m02 * nz0;
+        var rny = m10 * nx0 + m11 * ny0 + m12 * nz0;
+        var rnz = m20 * nx0 + m21 * ny0 + m22 * nz0;
+        if (rnz < 0.42) continue;
+        var rx = m00 * vx0 + m01 * vy0 + m02 * vz0;
+        var ry = m10 * vx0 + m11 * vy0 + m12 * vz0;
+        var rz = m20 * vx0 + m21 * vy0 + m22 * vz0;
+        var f = DC / (DC - rz);
+        var sx = cx + rx * f * S;
+        var sy = cy - ry * f * S;
+        var alpha = Math.min(1, (rnz - 0.42) / 0.45);
+        var col = hsl2rgb(sprinkleHue[s2] * 1.37 + 0.06, 0.92, 0.74);
+        fx.save();
+        fx.globalAlpha = alpha * 0.95;
+        fx.translate(sx, sy);
+        fx.rotate(sprinkleRot[s2] + st.yaw * 0.4);
+        fx.fillStyle = 'rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')';
+        var rr = Math.max(0.65, S * 0.0118);
+        fx.beginPath();
+        if (fx.roundRect) fx.roundRect(-rr * 1.85, -rr * 0.7, rr * 3.7, rr * 1.4, rr);
+        else fx.rect(-rr * 1.85, -rr * 0.7, rr * 3.7, rr * 1.4);
+        fx.fill();
+        fx.restore();
+      }
+    }
+
+    /* ripples */
+    for (var ri = 0; ri < ripples.length; ri++) {
+      var rp = ripples[ri];
+      var t2 = rp.life / rp.max;
+      fx.save();
+      fx.globalCompositeOperation = 'lighter';
+      fx.globalAlpha = (1 - t2) * 0.45 * rp.s;
+      fx.strokeStyle = 'rgba(' + mode.glow[0] + ',' + mode.glow[1] + ',' + mode.glow[2] + ',1)';
+      fx.lineWidth = 1.6 + (1 - t2) * 3;
+      fx.beginPath();
+      fx.arc(rp.x, rp.y, rp.r, 0, 6.283);
+      fx.stroke();
+      fx.globalAlpha = (1 - t2) * 0.18 * rp.s;
+      fx.beginPath();
+      fx.arc(rp.x, rp.y, rp.r * 0.7, 0, 6.283);
+      fx.stroke();
+      fx.restore();
+    }
+
+    /* particles */
+    fx.save();
+    fx.globalCompositeOperation = 'lighter';
+    for (var pi = 0; pi < parts.length; pi++) {
+      var p = parts[pi];
+      var lt = p.life / p.max;
+      var fade = lt < 0.15 ? lt / 0.15 : 1 - (lt - 0.15) / 0.85;
+      if (fade <= 0) continue;
+      var c2 = hsl2rgb((p.hue + time * 0.05) % 1, 0.95, 0.72);
+      fx.globalAlpha = fade * 0.85;
+      fx.fillStyle = 'rgba(' + c2[0] + ',' + c2[1] + ',' + c2[2] + ',1)';
+      fx.beginPath();
+      fx.arc(p.x, p.y, p.r, 0, 6.283);
+      fx.fill();
+      fx.globalAlpha = fade * 0.16;
+      fx.beginPath();
+      fx.arc(p.x, p.y, p.r * 2.8, 0, 6.283);
+      fx.fill();
+    }
+    fx.restore();
+
+    /* twinkles */
+    fx.save();
+    fx.globalCompositeOperation = 'lighter';
+    for (var si = 0; si < stars.length; si += 2) {
+      var s3 = stars[si];
+      var tw = 0.5 + 0.5 * Math.sin(time * 1.7 + s3.ph);
+      fx.globalAlpha = tw * s3.a * 0.7;
+      fx.fillStyle = '#fff';
+      fx.beginPath();
+      fx.arc(s3.x * W, s3.y * H, s3.r * (0.7 + tw * 0.6), 0, 6.283);
+      fx.fill();
+    }
+    fx.restore();
+  }
+
+  /* minimal 2D heart if WebGL is unavailable */
+  function fallbackHeart(cx, cy, S, pulse) {
+    und.save();
+    und.translate(cx, cy);
+    und.scale(S * 0.062 * pulse, -S * 0.062 * pulse);
+    und.beginPath();
+    for (var i = 0; i <= 120; i++) {
+      var t = i / 120 * Math.PI * 2;
+      var s = Math.sin(t);
+      var x = 16 * s * s * s;
+      var y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+      if (i === 0) und.moveTo(x, y - 3); else und.lineTo(x, y - 3);
+    }
+    und.closePath();
+    var g = und.createLinearGradient(-16, 12, 16, -16);
+    g.addColorStop(0, 'rgb(' + mode.glow[0] + ',' + mode.glow[1] + ',' + mode.glow[2] + ')');
+    g.addColorStop(1, 'rgb(' + mode.rim[0] + ',' + mode.rim[1] + ',' + mode.rim[2] + ')');
+    und.fillStyle = g;
+    und.fill();
+    und.restore();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  loop                                                               */
+  /* ------------------------------------------------------------------ */
+  function frame(now) {
+    var dt = (now - lastNow) / 1000;
+    lastNow = now;
+    if (!isFinite(dt) || dt <= 0) dt = 0.016;
+    if (dt > 0.06) dt = 0.06;
+    time += dt;
+    update(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  interaction                                                        */
+  /* ------------------------------------------------------------------ */
+  function heartRadius() { return Math.min(W, H) * 0.33; }
+
+  function onDown(e) {
+    drag.on = true;
+    drag.id = e.pointerId;
+    drag.lx = e.clientX; drag.ly = e.clientY;
+    drag.startX = e.clientX; drag.startY = e.clientY;
+    drag.moved = 0;
+    drag.t = time;
+    pointer.x = e.clientX; pointer.y = e.clientY; pointer.has = true;
+    st.lastMove = time;
+    document.body.classList.add('dragging');
+    if (hit.setPointerCapture) { try { hit.setPointerCapture(e.pointerId); } catch (err) {} }
+    var cx = W * 0.5 + st.offX, cy = H * 0.52 + st.offY;
+    var d = Math.hypot(e.clientX - cx, e.clientY - cy);
+    addRipple(e.clientX, e.clientY, d < heartRadius() ? 1 : 0.5);
+    emitTrail(e.clientX, e.clientY, 8, 0.6);
+  }
+
+  function onMove(e) {
+    pointer.x = e.clientX; pointer.y = e.clientY; pointer.has = true;
+    if (!drag.on || e.pointerId !== drag.id) return;
+    var dx = e.clientX - drag.lx;
+    var dy = e.clientY - drag.ly;
+    drag.lx = e.clientX; drag.ly = e.clientY;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+
+    var dtm = Math.max(0.008, Math.min(0.05, time - drag.t));
+    st.offX += dx;
+    st.offY += dy;
+    st.offVX = dx / dtm;
+    st.offVY = dy / dtm;
+    drag.t = time;
+
+    st.yawV = dx * 6.2;
+    st.pitchV = dy * 4.6;
+    st.yaw += dx * 0.006;
+    st.pitch += dy * 0.0045;
+    st.roll = Math.max(-0.4, Math.min(0.4, st.roll + dx * 0.00025));
+    st.lastMove = time;
+
+    if (Math.random() < 0.8) emitTrail(e.clientX, e.clientY, 1, 1.1);
+  }
+
+  function onUp(e) {
+    if (!drag.on) return;
+    drag.on = false;
+    document.body.classList.remove('dragging');
+    st.lastMove = time;
+    var cx = W * 0.5 + st.offX, cy = H * 0.52 + st.offY;
+    if (drag.moved < 6) {
+      addRipple(cx, cy, 1.4);
+      emitTrail(cx, cy, 24, 1.4);
+      spawnBurst(cx, cy, 20);
+      st.pitchV += (Math.random() - 0.5) * 1.1;
+      st.yawV += (Math.random() - 0.5) * 2.0;
+    } else {
+      emitTrail(e.clientX, e.clientY, 8, 1.0);
+    }
+  }
+
+  var hit = document.getElementById('hit');
+  hit.addEventListener('pointerdown', onDown);
+  window.addEventListener('pointermove', onMove, { passive: true });
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
+  window.addEventListener('pointerleave', function () { pointer.has = false; });
+  hit.addEventListener('dblclick', function (e) {
+    e.preventDefault();
+    setMode((modeIdx + 1) % MODES.length);
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  UI                                                                 */
+  /* ------------------------------------------------------------------ */
+  var modesEl = document.getElementById('modes');
+  var buttons = [];
+  function buildUI() {
+    MODES.forEach(function (m, i) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = m.label;
+      b.className = i === modeIdx ? 'on' : '';
+      b.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); });
+      b.addEventListener('click', function (ev) { ev.stopPropagation(); setMode(i); });
+      modesEl.appendChild(b);
+      buttons.push(b);
+    });
+  }
+
+  function setMode(i) {
+    modeIdx = i;
+    mode = MODES[i];
+    paintBackground();
+    for (var b = 0; b < buttons.length; b++) buttons[b].className = b === i ? 'on' : '';
+    var cx = W * 0.5 + st.offX, cy = H * 0.52 + st.offY;
+    addRipple(cx, cy, 1.15);
+    emitTrail(cx, cy, 16, 1.2);
+    st.yawV += 0.8;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  boot                                                               */
+  /* ------------------------------------------------------------------ */
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    BDPR = Math.min(DPR, 1.5);
+    W = Math.max(1, window.innerWidth);
+    H = Math.max(1, window.innerHeight);
+
+    [undc, glc, fxc].forEach(function (c) {
+      c.width = Math.round(W * DPR);
+      c.height = Math.round(H * DPR);
+    });
+    bgc.width = Math.round(W * BDPR);
+    bgc.height = Math.round(H * BDPR);
+
+    und.setTransform(DPR, 0, 0, DPR, 0, 0);
+    fx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    makeStars();
+    paintBackground();
+  }
+
+  buildMesh();
+  var hasGL = initGL();
+  if (!hasGL) {
+    glc.style.display = 'none';
+    gl = null;
+  }
+  buildUI();
+  resize();
+
+  var rzTimer = 0;
+  window.addEventListener('resize', function () {
+    clearTimeout(rzTimer);
+    rzTimer = setTimeout(resize, 90);
+  });
+
+  time = 0;
+  lastNow = performance.now();
+  requestAnimationFrame(frame);
+
+  setTimeout(function () {
+    addRipple(W * 0.5, H * 0.52, 0.8);
+    emitTrail(W * 0.5, H * 0.52, 16, 1.1);
+  }, 240);
+})();
+</script>
+</body>
+</html>
