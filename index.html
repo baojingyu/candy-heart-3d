@@ -66,9 +66,27 @@
     box-shadow: 0 6px 22px rgba(255, 140, 210, .45);
     font-weight: 600;
   }
+  .snd {
+    position: fixed; z-index: 12;
+    top: clamp(14px, 2.4vw, 26px); right: clamp(14px, 2.4vw, 26px);
+    width: 44px; height: 44px; border-radius: 50%;
+    display: grid; place-items: center;
+    border: 1px solid rgba(255, 255, 255, .16);
+    background: rgba(255, 255, 255, .08);
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+    color: #fff; font-size: 17px; line-height: 1; cursor: pointer;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .4), inset 0 1px 0 rgba(255, 255, 255, .16);
+    transition: background .25s ease, opacity .25s ease, transform .2s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .snd:hover { background: rgba(255, 255, 255, .17); }
+  .snd:active { transform: scale(.94); }
+  .snd.off { opacity: .45; }
   @media (max-width: 520px) {
     .head h1 { letter-spacing: .26em; text-indent: .26em; }
     .modes button { padding: 8px 13px; }
+    .snd { width: 40px; height: 40px; font-size: 15px; }
   }
 </style>
 </head>
@@ -78,6 +96,7 @@
 <canvas class="layer" id="gl"></canvas>
 <canvas class="layer" id="fx"></canvas>
 <div id="hit"></div>
+<button id="snd" class="snd" type="button" aria-label="声音开关" title="声音开关">🔊</button>
 
 <div class="ui">
   <div class="head">
@@ -85,7 +104,7 @@
     <p>按住拖走 · 甩一下带着惯性旋转 · 双击 / 点下面换配色</p>
   </div>
   <div class="foot">
-    <div class="hint">点击爱心抖一抖</div>
+    <div class="hint">点击爱心抖一抖 · 右上角可开关声音</div>
     <div class="modes" id="modes"></div>
   </div>
 </div>
@@ -149,6 +168,120 @@
   ];
   var modeIdx = 0;
   var mode = MODES[0];
+
+  /* ------------------------------------------------------------------ */
+  /*  sound — everything synthesised with WebAudio, no audio files       */
+  /* ------------------------------------------------------------------ */
+  var SFX = (function () {
+    var ac = null, master = null, noiseBuf = null, enabled = true, unlocked = false;
+    try { enabled = localStorage.getItem('heart3d.snd') !== '0'; } catch (e) {}
+    var KEYS = { candy: 659.25, rainbow: 783.99, aurora: 587.33 };
+
+    function ctx() {
+      if (!ac) {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        try { ac = new AC(); } catch (e) { return null; }
+        master = ac.createGain();
+        master.gain.value = 0.2;
+        master.connect(ac.destination);
+      }
+      if (ac.state === 'suspended') { try { ac.resume(); } catch (e) {} }
+      return ac;
+    }
+    function ready() { return (enabled && unlocked) ? ctx() : null; }
+    function key() { return KEYS[mode.id] || 659.25; }
+
+    function tone(f, o) {
+      o = o || {};
+      var c = ready(); if (!c) return;
+      var t0 = c.currentTime + (o.delay || 0);
+      var dur = o.dur || 0.3;
+      var osc = c.createOscillator();
+      var g = c.createGain();
+      osc.type = o.type || 'sine';
+      osc.frequency.setValueAtTime(f, t0);
+      if (o.glide) {
+        try { osc.frequency.exponentialRampToValueAtTime(Math.max(24, o.glide), t0 + dur); } catch (e) {}
+      }
+      var peak = (o.gain == null ? 0.26 : o.gain);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(peak, t0 + (o.attack || 0.006));
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(g); g.connect(master);
+      osc.start(t0); osc.stop(t0 + dur + 0.03);
+      window.__sfxCount = (window.__sfxCount || 0) + 1;
+    }
+
+    function noise(dur, o) {
+      o = o || {};
+      var c = ready(); if (!c) return;
+      var t0 = c.currentTime;
+      if (!noiseBuf) {
+        noiseBuf = c.createBuffer(1, Math.floor(c.sampleRate * 0.4), c.sampleRate);
+        var d = noiseBuf.getChannelData(0);
+        for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      }
+      var src = c.createBufferSource();
+      src.buffer = noiseBuf;
+      var bp = c.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.Q.value = o.q || 1.1;
+      bp.frequency.setValueAtTime(o.f0 || 700, t0);
+      try { bp.frequency.exponentialRampToValueAtTime(o.f1 || 2400, t0 + dur); } catch (e) {}
+      var g = c.createGain();
+      var peak = (o.gain == null ? 0.14 : o.gain);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(peak, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      src.connect(bp); bp.connect(g); g.connect(master);
+      src.start(t0); src.stop(t0 + dur + 0.02);
+      window.__sfxCount = (window.__sfxCount || 0) + 1;
+    }
+
+    return {
+      get enabled() { return enabled; },
+      unlock: function () { unlocked = true; if (enabled) ctx(); },
+      setEnabled: function (v) {
+        enabled = !!v;
+        try { localStorage.setItem('heart3d.snd', enabled ? '1' : '0'); } catch (e) {}
+        if (enabled) {
+          var k = key();
+          tone(k, { dur: 0.16, gain: 0.16, type: 'triangle' });
+          tone(k * 1.5, { dur: 0.22, gain: 0.12, delay: 0.07, type: 'sine' });
+        }
+      },
+      tap: function () {
+        var k = key();
+        tone(k, { dur: 0.18, gain: 0.22, type: 'triangle', glide: k * 1.32 });
+        noise(0.14, { f0: 900, f1: 2600, gain: 0.09, q: 0.9 });
+      },
+      pop: function () {
+        var k = key();
+        var steps = [0, 4, 7, 12];
+        for (var i = 0; i < steps.length; i++) {
+          tone(k * Math.pow(2, steps[i] / 12), {
+            dur: 0.34, gain: 0.19 - i * 0.03, delay: i * 0.045, type: 'sine'
+          });
+        }
+      },
+      sparkle: function () {
+        for (var i = 0; i < 5; i++) {
+          tone(1400 + Math.random() * 1800, {
+            dur: 0.16 + Math.random() * 0.14, gain: 0.085, delay: i * 0.05, type: 'sine'
+          });
+        }
+      },
+      swish: function (v) {
+        noise(0.11, { f0: 600 + v * 500, f1: 1800 + v * 1800, gain: 0.045 + v * 0.05, q: 1.6 });
+      },
+      thump: function () {
+        var k = key();
+        tone(k * 0.14, { dur: 0.2, gain: 0.18, type: 'sine', glide: k * 0.09 });
+        tone(k * 0.2, { dur: 0.14, gain: 0.08, delay: 0.16, type: 'sine', glide: k * 0.13 });
+      }
+    };
+  })();
 
   /* ------------------------------------------------------------------ */
   /*  heart mesh                                                         */
@@ -523,8 +656,9 @@
     yawV: 0.3, pitchV: 0,
     offX: 0, offY: 0, offVX: 0, offVY: 0,
     lookX: 0, lookY: 0,
-    held: 0, pulse: 1, lastMove: -10
+    held: 0, pulse: 1, lastMove: -10, lastBeat: 0
   };
+  var lastSwish = -1;
   var pointer = { x: 0, y: 0, has: false };
   var drag = { on: false, id: null, lx: 0, ly: 0, t: 0, startX: 0, startY: 0, moved: 0 };
 
@@ -656,6 +790,11 @@
     if (st.pitch < -1.1) { st.pitch = -1.1; st.pitchV *= -0.35; }
 
     st.pulse = 1 + beat(time) * 0.062 + st.held * 0.05;
+
+    /* a soft heartbeat thump on every beat */
+    var bpNow = (time % 1.06) / 1.06;
+    if (bpNow < st.lastBeat && time > 1.6 && !drag.on) SFX.thump();
+    st.lastBeat = bpNow;
 
     var lx = -0.42 + st.lookX * 0.5, ly = 0.62 - st.lookY * 0.38, lz = 0.8;
     var ll = Math.sqrt(lx * lx + ly * ly + lz * lz);
@@ -884,6 +1023,8 @@
     drag.t = time;
     pointer.x = e.clientX; pointer.y = e.clientY; pointer.has = true;
     st.lastMove = time;
+    SFX.unlock();
+    SFX.tap();
     document.body.classList.add('dragging');
     if (hit.setPointerCapture) { try { hit.setPointerCapture(e.pointerId); } catch (err) {} }
     var cx = W * 0.5 + st.offX, cy = H * 0.52 + st.offY;
@@ -914,6 +1055,11 @@
     st.roll = Math.max(-0.4, Math.min(0.4, st.roll + dx * 0.00025));
     st.lastMove = time;
 
+    if (time - lastSwish > 0.11) {
+      lastSwish = time;
+      var spd = Math.min(1, Math.sqrt(st.offVX * st.offVX + st.offVY * st.offVY) / 900);
+      SFX.swish(spd);
+    }
     if (Math.random() < 0.8) emitTrail(e.clientX, e.clientY, 1, 1.1);
   }
 
@@ -927,6 +1073,8 @@
       addRipple(cx, cy, 1.4);
       emitTrail(cx, cy, 24, 1.4);
       spawnBurst(cx, cy, 20);
+      SFX.pop();
+      SFX.sparkle();
       st.pitchV += (Math.random() - 0.5) * 1.1;
       st.yawV += (Math.random() - 0.5) * 2.0;
     } else {
@@ -971,6 +1119,7 @@
     var cx = W * 0.5 + st.offX, cy = H * 0.52 + st.offY;
     addRipple(cx, cy, 1.15);
     emitTrail(cx, cy, 16, 1.2);
+    SFX.sparkle();
     st.yawV += 0.8;
   }
 
@@ -1005,6 +1154,20 @@
   }
   buildUI();
   resize();
+
+  /* sound toggle */
+  var sndBtn = document.getElementById('snd');
+  function paintSnd() {
+    sndBtn.textContent = SFX.enabled ? '🔊' : '🔇';
+    sndBtn.classList.toggle('off', !SFX.enabled);
+  }
+  sndBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    SFX.unlock();
+    SFX.setEnabled(!SFX.enabled);
+    paintSnd();
+  });
+  paintSnd();
 
   var rzTimer = 0;
   window.addEventListener('resize', function () {
